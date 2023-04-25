@@ -1,4 +1,10 @@
-import { REST, Routes, Client, GatewayIntentBits } from "discord.js";
+import {
+  REST,
+  Routes,
+  Client,
+  GatewayIntentBits,
+  ActivityType,
+} from "discord.js";
 import { config } from "dotenv";
 import { DiscordLink, TwitterLink } from "./odm";
 import mongoose from "mongoose";
@@ -44,7 +50,6 @@ const getUserDataFromDiscordId = async (discordId: string) => {
     return null;
   }
 };
-
 
 const { TOKEN, CLIENT_ID, MONGODB_URI } = process.env;
 
@@ -100,6 +105,17 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.on("ready", () => {
   console.log(`Logged in as ${client.user.tag}!`);
+
+  client.user.setPresence({
+    status: "online",
+    activities: [
+      {
+        name: "www.social-link.xyz",
+        type: ActivityType.Playing,
+        url: "https://www.social-link.xyz",
+      },
+    ],
+  });
 });
 
 client.on("interactionCreate", async (interaction) => {
