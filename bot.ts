@@ -4,9 +4,10 @@ import {
   Client,
   GatewayIntentBits,
   ActivityType,
+  PermissionsBitField,
 } from "discord.js";
 import { config } from "dotenv";
-import { ProviderLink } from "./odm";
+import { ProviderLink, ServerSettings } from "./odm";
 import mongoose from "mongoose";
 import Express from "express";
 
@@ -24,17 +25,23 @@ const getUserDataFromDiscordId = async (discordId: string) => {
 
     discordId = discordId.trim().slice(2, -1);
 
-    const discordUser = await ProviderLink.findOne({ providerId: discordId, provider: "discord" });
+    const discordUser = await ProviderLink.findOne({
+      providerId: discordId,
+      provider: "discord",
+    });
     console.log("Discord user", discordUser, discordId);
     if (!discordUser) {
       abort();
       return null;
     }
-    
+
     // get all the other links
     const address = discordUser.address;
-    const otherLinks = await ProviderLink.find({ address, provider: { $ne: "discord" } });
-    
+    const otherLinks = await ProviderLink.find({
+      address,
+      provider: { $ne: "discord" },
+    });
+
     const twitterUser = otherLinks.find((link) => link.provider === "twitter");
     const googleUser = otherLinks.find((link) => link.provider === "google");
 
@@ -62,16 +69,43 @@ app.use(Express.json());
 
 app.post("/discord", async (req, res) => {
   const { body } = req;
-  const id = body.id;
+  const address = body.address;
 
-  if (!body.id) {
-    console.log("No id in body");
+  if (!address) {
+    console.log("No address in body");
     res.sendStatus(400);
     res.end();
     return;
   }
 
-  console.log("Discord webhook", id);
+  const links = await ProviderLink.find({ address });
+  if (links.length === 0) {
+    console.log("No links found");
+    res.sendStatus(404);
+    res.end();
+    return;
+  }
+
+  const discordLinks = links.filter((link) => link.provider === "discord");
+  if (discordLinks.length === 0) {
+    console.log("No discord links found");
+    res.sendStatus(404);
+    res.end();
+    return;
+  }
+
+  if (discordLinks.length > 1) {
+    console.log("Warning: More than one discord link found");
+  }
+
+  const discordLink = discordLinks[0];
+
+  const discordId = discordLink.providerId;
+
+  // TODO Update the user roles if they have linked the accounts
+  // console.log("TODO: Update user roles", discordId);
+  await updateUserRoles(discordId);
+
   res.sendStatus(200);
   res.end();
 });
@@ -90,6 +124,19 @@ const commands = [
         name: "discord_id",
         description: "The discord id of the user",
         type: 3,
+        required: true,
+      },
+    ],
+  },
+  // sets the verified role for the server
+  {
+    name: "setrole",
+    description: "Sets the verified role for the server",
+    options: [
+      {
+        name: "role",
+        description: "The role to set",
+        type: 8,
         required: true,
       },
     ],
@@ -122,6 +169,33 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
+const updateUserRoles = async (discordId: string) => {
+  // check each server the bot is in
+  const guilds = client.guilds.cache;
+  for (const guild of guilds.values()) {
+    // get the server settings
+    const serverSettings = await ServerSettings.findOne({
+      guildId: guild.id,
+    });
+    if (!serverSettings) {
+      console.log("No server settings found for guild", guild.id);
+      continue;
+    }
+
+    // check if the user is in the server
+    const member = await guild.members.fetch(discordId);
+    if (!member) {
+      console.log("User not found in guild", guild.id);
+      continue;
+    }
+
+    const verifiedRole = serverSettings.roleId;
+
+    // grant the user the verified role
+    await member.roles.add(verifiedRole);
+  }
+};
+
 client.on("ready", () => {
   console.log(`Logged in as ${client.user.tag}!`);
 
@@ -150,6 +224,23 @@ client.on("interactionCreate", async (interaction) => {
     await interaction.reply(
       `Address: ${userData.address}\nTwitter Id: ${userData.twitterId}`
     );
+  } else if (interaction.commandName === "setrole") {
+    // check if the user has the manage roles permission
+    const hasPermission = (
+      interaction.member.permissions as Readonly<PermissionsBitField>
+    ).has(PermissionsBitField.Flags.ManageRoles);
+    if (!hasPermission) {
+      await interaction.reply("You do not have permission to do this");
+      return;
+    }
+    const guildId = interaction.guildId;
+    const roleId = interaction.options.getRole("role").id;
+    await ServerSettings.findOneAndUpdate(
+      { guildId },
+      { roleId },
+      { upsert: true }
+    );
+    await interaction.reply("Verified role set");
   }
 });
 

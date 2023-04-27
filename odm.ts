@@ -20,20 +20,34 @@ const ProviderLink =
   (mongoose.models.DiscordLink as mongoose.Model<IProviderLink>) ||
   mongoose.model<IProviderLink>("ProviderLink", ProviderLinkSchema);
 
-interface ILinkable {
-  address: string;
-  csrfToken: string;
-  createdAt: Date;
-}
+// interface ILinkable {
+//   address: string;
+//   csrfToken: string;
+//   createdAt: Date;
+// }
 
-const LinkableSchema = new mongoose.Schema<ILinkable>({
-  address: { type: String, required: true, unique: true },
-  csrfToken: { type: String, required: true, unique: true },
-  createdAt: { type: Date, default: Date.now, expires: "5h" },
+// const LinkableSchema = new mongoose.Schema<ILinkable>({
+//   address: { type: String, required: true, unique: true },
+//   csrfToken: { type: String, required: true, unique: true },
+//   createdAt: { type: Date, default: Date.now, expires: "5h" },
+// });
+
+// const Linkable =
+//   (mongoose.models.Linkable as mongoose.Model<ILinkable>) ||
+//   mongoose.model<ILinkable>("Linkable", LinkableSchema);
+
+interface IServerSettings {
+  guildId: string;
+  roleId: string;
+};
+
+const ServerSettingsSchema = new mongoose.Schema<IServerSettings>({
+  guildId: { type: String, required: true, unique: true },
+  roleId: { type: String, required: true },
 });
 
-const Linkable =
-  (mongoose.models.Linkable as mongoose.Model<ILinkable>) ||
-  mongoose.model<ILinkable>("Linkable", LinkableSchema);
+const ServerSettings =
+  (mongoose.models.ServerSettings as mongoose.Model<IServerSettings>) ||
+  mongoose.model<IServerSettings>("ServerSettings", ServerSettingsSchema);
 
-export { ProviderLink, Linkable };
+export { ProviderLink, ServerSettings };
