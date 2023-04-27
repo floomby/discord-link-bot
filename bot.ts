@@ -6,8 +6,9 @@ import {
   ActivityType,
 } from "discord.js";
 import { config } from "dotenv";
-import { DiscordLink, TwitterLink } from "./odm";
+import { ProviderLink } from "./odm";
 import mongoose from "mongoose";
+import Express from "express";
 
 config();
 
@@ -23,18 +24,19 @@ const getUserDataFromDiscordId = async (discordId: string) => {
 
     discordId = discordId.trim().slice(2, -1);
 
-    const discordUser = await DiscordLink.findOne({ discordId });
+    const discordUser = await ProviderLink.findOne({ providerId: discordId, provider: "discord" });
     console.log("Discord user", discordUser, discordId);
     if (!discordUser) {
       abort();
       return null;
     }
+    
+    // get all the other links
     const address = discordUser.address;
-    const twitterUser = await TwitterLink.findOne({ address });
-    if (!twitterUser) {
-      abort();
-      return null;
-    }
+    const otherLinks = await ProviderLink.find({ address, provider: { $ne: "discord" } });
+    
+    const twitterUser = otherLinks.find((link) => link.provider === "twitter");
+    const googleUser = otherLinks.find((link) => link.provider === "google");
 
     // commit the transaction
     await session.commitTransaction();
@@ -43,7 +45,8 @@ const getUserDataFromDiscordId = async (discordId: string) => {
     return {
       discordId,
       address,
-      twitterId: twitterUser.twitterId,
+      twitterId: twitterUser?.providerId ?? null,
+      googleId: googleUser?.providerId ?? null,
     };
   } catch (error) {
     console.error(error);
@@ -51,13 +54,33 @@ const getUserDataFromDiscordId = async (discordId: string) => {
   }
 };
 
-const { TOKEN, CLIENT_ID, MONGODB_URI } = process.env;
+const { TOKEN, CLIENT_ID, MONGODB_URI, WEBHOOK_PORT } = process.env;
+
+// set up the express server
+const app = Express();
+app.use(Express.json());
+
+app.post("/discord", async (req, res) => {
+  const { body } = req;
+  const id = body.id;
+
+  if (!body.id) {
+    console.log("No id in body");
+    res.sendStatus(400);
+    res.end();
+    return;
+  }
+
+  console.log("Discord webhook", id);
+  res.sendStatus(200);
+  res.end();
+});
+
+app.listen(WEBHOOK_PORT, () => {
+  console.log(`Listening on port ${WEBHOOK_PORT}`);
+});
 
 const commands = [
-  {
-    name: "ping",
-    description: "Replies with Pong!",
-  },
   // return the users address and twitter id
   {
     name: "info",
@@ -89,16 +112,12 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
     console.error(error);
   }
 
-  // set up watches on insertions for the two collections
-  const discordLinkChangeStream = DiscordLink.watch();
-  const twitterLinkChangeStream = TwitterLink.watch();
+  // set up watches on insertions for the two collections (does not work with serverless)
+  // const providerLinkChangeStream = ProviderLink.watch();
 
-  discordLinkChangeStream.on("change", (change) => {
-    console.log(change);
-  });
-  twitterLinkChangeStream.on("change", (change) => {
-    console.log(change);
-  });
+  // providerLinkChangeStream.on("change", (change) => {
+  //   console.log(change);
+  // });
 })();
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -121,9 +140,7 @@ client.on("ready", () => {
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === "ping") {
-    await interaction.reply("Pong!");
-  } else if (interaction.commandName === "info") {
+  if (interaction.commandName === "info") {
     const discordId = interaction.options.getString("discord_id");
     const userData = await getUserDataFromDiscordId(discordId);
     if (!userData) {
