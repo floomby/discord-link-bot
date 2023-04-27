@@ -5,6 +5,7 @@ import {
   GatewayIntentBits,
   ActivityType,
   PermissionsBitField,
+  Guild,
 } from "discord.js";
 import { config } from "dotenv";
 import { ProviderLink, ServerSettings } from "./odm";
@@ -14,6 +15,8 @@ import Express from "express";
 config();
 
 const getUserDataFromDiscordId = async (discordId: string) => {
+  console.log("Getting user data from discord id", discordId);
+
   // start a transaction
   try {
     const session = await mongoose.startSession();
@@ -23,13 +26,14 @@ const getUserDataFromDiscordId = async (discordId: string) => {
       session.endSession();
     };
 
-    discordId = discordId.trim().slice(2, -1);
+    if (discordId.startsWith("<@") && discordId.endsWith(">")) {
+      discordId = discordId.trim().slice(2, -1);
+    }
 
     const discordUser = await ProviderLink.findOne({
       providerId: discordId,
       provider: "discord",
     });
-    console.log("Discord user", discordUser, discordId);
     if (!discordUser) {
       abort();
       return null;
@@ -167,34 +171,64 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
   // });
 })();
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    // GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
+  ],
+});
+
+const isUserVerified = async (discordId: string) => {
+  const userData = await getUserDataFromDiscordId(discordId);
+  return !!userData?.twitterId && !!userData?.googleId;
+};
+
+const updateUserRoleForGuild = async (
+  discordId: string,
+  guild: Guild,
+  verified: boolean
+) => {
+  // check if the user is in the server
+  const member = await guild.members.fetch(discordId);
+  if (!member) {
+    console.log("User not found in guild", guild.id);
+    return;
+  }
+
+  // get the server settings
+  const serverSettings = await ServerSettings.findOne({
+    guildId: guild.id,
+  });
+  if (!serverSettings) {
+    console.log("No server settings found for guild", guild.id);
+    return;
+  }
+
+  const verifiedRole = serverSettings.roleId;
+
+  // grant the user the verified role
+  if (verified) {
+    await member.roles.add(verifiedRole);
+  } else {
+    await member.roles.remove(verifiedRole);
+  }
+};
 
 const updateUserRoles = async (discordId: string) => {
   // check each server the bot is in
+  const verificationStatus = await isUserVerified(discordId);
   const guilds = client.guilds.cache;
   for (const guild of guilds.values()) {
-    // get the server settings
-    const serverSettings = await ServerSettings.findOne({
-      guildId: guild.id,
-    });
-    if (!serverSettings) {
-      console.log("No server settings found for guild", guild.id);
-      continue;
-    }
-
-    // check if the user is in the server
-    const member = await guild.members.fetch(discordId);
-    if (!member) {
-      console.log("User not found in guild", guild.id);
-      continue;
-    }
-
-    const verifiedRole = serverSettings.roleId;
-
-    // grant the user the verified role
-    await member.roles.add(verifiedRole);
+    await updateUserRoleForGuild(discordId, guild, verificationStatus);
   }
 };
+
+client.on("guildMemberAdd", async (member) => {
+  const discordId = member.id;
+  await updateUserRoles(discordId);
+});
 
 client.on("ready", () => {
   console.log(`Logged in as ${client.user.tag}!`);
@@ -222,7 +256,9 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
     await interaction.reply(
-      `Address: ${userData.address}\nTwitter Id: ${userData.twitterId}`
+      `Address: ${userData?.address ?? "N/A"}\nTwitter Id: ${
+        userData?.twitterId ?? "N/A"
+      }\nGoogle Id: ${userData?.googleId ?? "N/A"}`
     );
   } else if (interaction.commandName === "setrole") {
     // check if the user has the manage roles permission
