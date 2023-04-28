@@ -6,6 +6,7 @@ import {
   ActivityType,
   PermissionsBitField,
   Guild,
+  GuildMember,
 } from "discord.js";
 import { config } from "dotenv";
 import { ProviderLink, ServerSettings } from "./odm";
@@ -17,48 +18,22 @@ config();
 const getUserDataFromDiscordId = async (discordId: string) => {
   console.log("Getting user data from discord id", discordId);
 
-  // start a transaction
   try {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-    const abort = () => {
-      session.abortTransaction();
-      session.endSession();
-    };
-
     if (discordId.startsWith("<@") && discordId.endsWith(">")) {
       discordId = discordId.trim().slice(2, -1);
     }
 
-    const discordUser = await ProviderLink.findOne({
-      providerId: discordId,
-      provider: "discord",
-    });
-    if (!discordUser) {
-      abort();
-      return null;
-    }
+    // get all the links for the user
+    const using = ["twitter", "google", "ethereum"];
 
-    // get all the other links
-    const address = discordUser.address;
-    const otherLinks = await ProviderLink.find({
-      address,
-      provider: { $ne: "discord" },
-    });
-
-    const twitterUser = otherLinks.find((link) => link.provider === "twitter");
-    const googleUser = otherLinks.find((link) => link.provider === "google");
-
-    // commit the transaction
-    await session.commitTransaction();
-    session.endSession();
-
-    return {
+    const links = await ProviderLink.find({
       discordId,
-      address,
-      twitterId: twitterUser?.providerId ?? null,
-      googleId: googleUser?.providerId ?? null,
-    };
+      provider: { $in: using },
+    });
+
+    return Object.fromEntries(
+      links.map((link) => [link.provider, link.providerId])
+    );
   } catch (error) {
     console.error(error);
     return null;
@@ -73,42 +48,16 @@ app.use(Express.json());
 
 app.post("/discord", async (req, res) => {
   const { body } = req;
-  const address = body.address;
+  const id = body.id;
 
-  if (!address) {
-    console.log("No address in body");
+  if (!id) {
+    console.log("No id in body");
     res.sendStatus(400);
     res.end();
     return;
   }
 
-  const links = await ProviderLink.find({ address });
-  if (links.length === 0) {
-    console.log("No links found");
-    res.sendStatus(404);
-    res.end();
-    return;
-  }
-
-  const discordLinks = links.filter((link) => link.provider === "discord");
-  if (discordLinks.length === 0) {
-    console.log("No discord links found");
-    res.sendStatus(404);
-    res.end();
-    return;
-  }
-
-  if (discordLinks.length > 1) {
-    console.log("Warning: More than one discord link found");
-  }
-
-  const discordLink = discordLinks[0];
-
-  const discordId = discordLink.providerId;
-
-  // TODO Update the user roles if they have linked the accounts
-  // console.log("TODO: Update user roles", discordId);
-  await updateUserRoles(discordId);
+  await updateUserRoles(id);
 
   res.sendStatus(200);
   res.end();
@@ -182,7 +131,12 @@ const client = new Client({
 
 const isUserVerified = async (discordId: string) => {
   const userData = await getUserDataFromDiscordId(discordId);
-  return !!userData?.twitterId && !!userData?.googleId;
+  if (!userData) {
+    return false;
+  }
+  return ["twitter", "google", "ethereum"].every(
+    (provider) => provider in userData
+  );
 };
 
 const updateUserRoleForGuild = async (
@@ -191,28 +145,38 @@ const updateUserRoleForGuild = async (
   verified: boolean
 ) => {
   // check if the user is in the server
-  const member = await guild.members.fetch(discordId);
-  if (!member) {
-    console.log("User not found in guild", guild.id);
-    return;
-  }
-
-  // get the server settings
-  const serverSettings = await ServerSettings.findOne({
-    guildId: guild.id,
-  });
-  if (!serverSettings) {
-    console.log("No server settings found for guild", guild.id);
-    return;
-  }
-
-  const verifiedRole = serverSettings.roleId;
-
-  // grant the user the verified role
-  if (verified) {
-    await member.roles.add(verifiedRole);
-  } else {
-    await member.roles.remove(verifiedRole);
+  try {
+    let member: GuildMember;
+    try {
+      member = await guild.members.fetch(discordId);
+      if (!member) {
+        console.log("User not found in guild", guild.id);
+        return;
+      }
+    } catch (error) {
+      console.log("User not found in guild", guild.id);
+      return;
+    }
+  
+    // get the server settings
+    const serverSettings = await ServerSettings.findOne({
+      guildId: guild.id,
+    });
+    if (!serverSettings) {
+      console.log("No server settings found for guild", guild.id);
+      return;
+    }
+  
+    const verifiedRole = serverSettings.roleId;
+  
+    // grant the user the verified role
+    if (verified) {
+      await member.roles.add(verifiedRole);
+    } else {
+      await member.roles.remove(verifiedRole);
+    }
+  } catch (error) {
+    console.error(error);
   }
 };
 
@@ -255,10 +219,11 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.reply("No user found");
       return;
     }
+    // prettier-ignore
     await interaction.reply(
-      `Address: ${userData?.address ?? "N/A"}\nTwitter Id: ${
-        userData?.twitterId ?? "N/A"
-      }\nGoogle Id: ${userData?.googleId ?? "N/A"}`
+`Address: ${userData.ethereum}
+Twitter: ${userData.twitter}
+Google: ${userData.google}`
     );
   } else if (interaction.commandName === "setrole") {
     // check if the user has the manage roles permission
