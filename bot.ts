@@ -14,7 +14,6 @@ import { config } from "dotenv";
 import { ProviderLink, ServerSettings } from "./odm";
 import mongoose from "mongoose";
 import Express from "express";
-import { ObjectId } from "mongodb";
 
 config();
 
@@ -93,8 +92,9 @@ const verifyTwitterAuthorization = async (
   }
 
   return false;
-  // remove the account
 };
+
+const supportedProviders = ["twitter", "google", "ethereum"];
 
 const getUserDataFromDiscordId = async (discordId: string) => {
   console.log("Getting user data from discord id", discordId);
@@ -104,12 +104,9 @@ const getUserDataFromDiscordId = async (discordId: string) => {
       discordId = discordId.trim().slice(2, -1);
     }
 
-    // get all the links for the user
-    const using = ["twitter", "google", "ethereum"];
-
     const links = await ProviderLink.find({
       discordId,
-      provider: { $in: using },
+      provider: { $in: supportedProviders },
     });
 
     return Object.fromEntries(
@@ -144,7 +141,7 @@ app.post("/discord", async (req, res) => {
   res.end();
 });
 
-app.post("/checkAuth", async (req, res) => {
+const checkAuth = async () => {
   try {
     const docs = await mongoose.connection.db
       .collection("providerlinks")
@@ -152,6 +149,7 @@ app.post("/checkAuth", async (req, res) => {
         {
           $match: {
             provider: "twitter",
+            revokedAt: null,
           },
         },
         {
@@ -192,14 +190,24 @@ app.post("/checkAuth", async (req, res) => {
     console.log(verified);
   } catch (error) {
     console.error(error);
+    return false;
+  }
+
+  return true;
+};
+
+app.post("/checkAuth", async (req, res) => {
+  const success = await checkAuth();
+  if (!success) {
     res.sendStatus(500);
     res.end();
     return;
   }
-
   res.sendStatus(200);
   res.end();
 });
+
+setInterval(checkAuth, 1000 * 20 * 60);
 
 app.listen(WEBHOOK_PORT, () => {
   console.log(`Listening on port ${WEBHOOK_PORT}`);
@@ -209,7 +217,7 @@ const commands = [
   // return the users address and twitter id
   {
     name: "info",
-    description: "Returns the users address and twitter id",
+    description: "Returns the users details",
     options: [
       {
         name: "discord_id",
@@ -232,6 +240,39 @@ const commands = [
       },
     ],
   },
+  {
+    name: "displayrole",
+    description: "Displays the verified role for the server",
+    options: [],
+  },
+  {
+    name: "sync",
+    description: "Re-syncs every user on the server",
+    options: [],
+  },
+  {
+    name: "setproviders",
+    description:
+      "Sets the verification providers for the server in the form of <provider>,<provider>,...",
+    options: [
+      {
+        name: "providers",
+        description: "The providers to set",
+        type: 3,
+        required: true,
+      },
+    ],
+  },
+  {
+    name: "listproviders",
+    description: "Lists the verification providers for the server",
+    options: [],
+  },
+  {
+    name: "supportedproviders",
+    description: "Lists the supported verification providers",
+    options: [],
+  },
 ];
 
 const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -249,13 +290,6 @@ const rest = new REST({ version: "10" }).setToken(TOKEN);
   } catch (error) {
     console.error(error);
   }
-
-  // set up watches on insertions for the two collections (does not work with serverless)
-  // const providerLinkChangeStream = ProviderLink.watch();
-
-  // providerLinkChangeStream.on("change", (change) => {
-  //   console.log(change);
-  // });
 })();
 
 const client = new Client({
@@ -270,17 +304,15 @@ const client = new Client({
 const isUserVerified = async (discordId: string) => {
   const userData = await getUserDataFromDiscordId(discordId);
   if (!userData) {
-    return false;
+    return {};
   }
-  return ["twitter", "google", "ethereum"].every(
-    (provider) => provider in userData
-  );
+  return userData;
 };
 
 const updateUserRoleForGuild = async (
   discordId: string,
   guild: Guild,
-  verified: boolean
+  verified: { [key: string]: string }
 ) => {
   // check if the user is in the server
   try {
@@ -288,11 +320,11 @@ const updateUserRoleForGuild = async (
     try {
       member = await guild.members.fetch(discordId);
       if (!member) {
-        console.log("User not found in guild", guild.id);
+        console.log(`User ${discordId} not found in guild`, guild.id);
         return;
       }
     } catch (error) {
-      console.log("User not found in guild", guild.id);
+      console.log(`User ${discordId} not found in guild`, guild.id);
       return;
     }
 
@@ -308,7 +340,8 @@ const updateUserRoleForGuild = async (
     const verifiedRole = serverSettings.roleId;
 
     // grant the user the verified role
-    if (verified) {
+    console.log(verified);
+    if (serverSettings.providers.every((p) => verified[p])) {
       await member.roles.add(verifiedRole);
     } else {
       await member.roles.remove(verifiedRole);
@@ -381,6 +414,96 @@ Google: ${userData.google}`
       { upsert: true }
     );
     await interaction.reply("Verified role set");
+
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) {
+      console.log("Guild not found", guildId);
+      return;
+    }
+
+    const members = await guild.members.fetch();
+    for (const member of members.values()) {
+      await updateUserRoles(member.id);
+    }
+  } else if (interaction.commandName === "sync") {
+    const hasPermission = (
+      interaction.member.permissions as Readonly<PermissionsBitField>
+    ).has(PermissionsBitField.Flags.ManageRoles);
+    if (!hasPermission) {
+      await interaction.reply("You do not have permission to do this");
+      return;
+    }
+    const guildId = interaction.guildId;
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) {
+      await interaction.reply("No guild found");
+      return;
+    }
+    await interaction.reply("Resyncing users");
+    const members = await guild.members.fetch();
+    for (const member of members.values()) {
+      await updateUserRoles(member.id);
+    }
+  } else if (interaction.commandName === "displayrole") {
+    const guildId = interaction.guildId;
+    const serverSettings = await ServerSettings.findOne({ guildId });
+    if (!serverSettings) {
+      await interaction.reply("No role set");
+      return;
+    }
+    const roleId = serverSettings.roleId;
+    const role = interaction.guild.roles.cache.get(roleId);
+    if (!role) {
+      await interaction.reply("No role set");
+      return;
+    }
+    await interaction.reply(`Role set to ${role.name}`);
+  } else if (interaction.commandName === "setproviders") {
+    const hasPermission = (
+      interaction.member.permissions as Readonly<PermissionsBitField>
+    ).has(PermissionsBitField.Flags.ManageRoles);
+    if (!hasPermission) {
+      await interaction.reply("You do not have permission to do this");
+      return;
+    }
+    const guildId = interaction.guildId;
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) {
+      await interaction.reply("No guild found");
+      return;
+    }
+
+    const providers = interaction.options.getString("providers");
+    const providersArray = providers
+      .split(",")
+      .map((provider) => provider.trim());
+
+    if (
+      !providersArray.every((provider) => supportedProviders.includes(provider))
+    ) {
+      await interaction.reply("Invalid provider options");
+      return;
+    }
+
+    await ServerSettings.findOneAndUpdate(
+      { guildId },
+      { providers: providersArray },
+      { upsert: true }
+    );
+    await interaction.reply("Providers set to " + providersArray.join(", "));
+    const members = await guild.members.fetch();
+    for (const member of members.values()) {
+      await updateUserRoles(member.id);
+    }
+  } else if (interaction.commandName === "listproviders") {
+    const guildId = interaction.guildId;
+    const serverSettings = await ServerSettings.findOne({ guildId });
+    if (!serverSettings) {
+      await interaction.reply("No providers set");
+      return;
+    }
+    const providers = serverSettings.providers;
+    await interaction.reply(`Providers set to ${providers.join(", ")}`);
   }
 });
 

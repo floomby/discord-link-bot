@@ -25,11 +25,13 @@ const ProviderLink =
 interface IServerSettings {
   guildId: string;
   roleId: string;
+  providers: string[];
 };
 
 const ServerSettingsSchema = new mongoose.Schema<IServerSettings>({
   guildId: { type: String, required: true, unique: true },
   roleId: { type: String, required: true },
+  providers: { type: [String], required: true, default: ["twitter", "google", "ethereum"] },
 });
 
 const ServerSettings =
