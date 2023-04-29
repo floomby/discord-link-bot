@@ -95,7 +95,7 @@ const verifyTwitterAuthorization = async (
   return false;
 };
 
-const supportedProviders = ["twitter", "google", "ethereum"];
+const supportedProviders = ["twitter", "google", "ethereum", "github"];
 
 const getUserDataFromDiscordId = async (discordId: string) => {
   console.log("Getting user data from discord id", discordId);
@@ -465,7 +465,7 @@ Google: ${userData.google}`
       await interaction.reply("No role set");
       return;
     }
-    await interaction.reply(`Role set to ${role.name}`);
+    await interaction.reply(`Role set to \`${role.name}\``);
   } else if (interaction.commandName === "setproviders") {
     const hasPermission = (
       interaction.member.permissions as Readonly<PermissionsBitField>
@@ -513,7 +513,7 @@ Google: ${userData.google}`
     const providers = serverSettings.providers;
     await interaction.reply(`Providers set to ${providers.join(", ")}`);
   } else if (interaction.commandName === "supportedproviders") {
-    await interaction.reply("Currently supports " + supportedProviders.join(", "));
+    await interaction.reply("Currently supports " + supportedProviders.map(p => `\`${p}\``).join(" "));
   }
 });
 
