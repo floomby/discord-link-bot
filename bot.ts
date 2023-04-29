@@ -504,6 +504,8 @@ Google: ${userData.google}`
     }
     const providers = serverSettings.providers;
     await interaction.reply(`Providers set to ${providers.join(", ")}`);
+  } else if (interaction.commandName === "supportedproviders") {
+    await interaction.reply("Currently supports " + supportedProviders.join(", "));
   }
 });
 
