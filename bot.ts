@@ -95,6 +95,83 @@ const verifyTwitterAuthorization = async (
   return false;
 };
 
+const verifyGithubAuthorization = async (
+  accessToken: string,
+  githubId: string
+) => {
+  const response = await fetch(`https://api.github.com`, {
+    headers: {
+      Authorization: `token ${accessToken}`,
+    },
+  });
+
+  const verified = response.headers.get("x-oauth-scopes")?.includes("user");
+
+  if (verified) {
+    return true;
+  }
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  const abort = async () => {
+    await session.abortTransaction();
+    await session.endSession();
+  };
+
+  try {
+    await ProviderLink.updateOne(
+      {
+        provider: "github",
+        providerId: githubId,
+      },
+      {
+        $set: {
+          revokedAt: new Date(),
+        },
+      },
+      { session }
+    );
+
+    const oldAccount = await mongoose.connection.db
+      .collection("accounts")
+      .findOne(
+        {
+          providerAccountId: githubId,
+          provider: "github",
+        },
+        { session }
+      );
+
+    if (!oldAccount) {
+      await session.commitTransaction();
+      await session.endSession();
+      return false;
+    }
+
+    await mongoose.connection.db.collection("users").deleteOne(
+      {
+        _id: oldAccount.userId,
+      },
+      { session }
+    );
+
+    await mongoose.connection.db.collection("accounts").deleteOne(
+      {
+        _id: oldAccount._id,
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    await session.endSession();
+  } catch (error) {
+    console.error(error);
+    await abort();
+  }
+
+  return false;
+};
+
 const supportedProviders = ["twitter", "google", "ethereum", "github"];
 
 const getUserDataFromDiscordId = async (discordId: string) => {
@@ -119,7 +196,8 @@ const getUserDataFromDiscordId = async (discordId: string) => {
   }
 };
 
-const { TOKEN, CLIENT_ID, MONGODB_URI, WEBHOOK_PORT, DEVELOPER_ID } = process.env;
+const { TOKEN, CLIENT_ID, MONGODB_URI, WEBHOOK_PORT, DEVELOPER_ID } =
+  process.env;
 
 // set up the express server
 const app = Express();
@@ -149,7 +227,7 @@ const checkAuth = async () => {
       .aggregate([
         {
           $match: {
-            provider: "twitter",
+            provider: { $in: ["twitter", "github"] },
             revokedAt: null,
           },
         },
@@ -164,6 +242,7 @@ const checkAuth = async () => {
         // project so that we just get the discord id the twitter id and the access token
         {
           $project: {
+            provider: 1,
             discordId: 1,
             providerId: 1,
             accessToken: { $arrayElemAt: ["$account.access_token", 0] },
@@ -176,10 +255,9 @@ const checkAuth = async () => {
 
     const verified = await Promise.all(
       docs.map(async (doc) => {
-        const verified = await verifyTwitterAuthorization(
-          doc.accessToken,
-          doc.providerId
-        );
+        const verified = await (doc.provider === "twitter"
+          ? verifyTwitterAuthorization(doc.accessToken, doc.providerId)
+          : verifyGithubAuthorization(doc.accessToken, doc.providerId));
 
         return {
           discordId: doc.discordId,
@@ -187,8 +265,6 @@ const checkAuth = async () => {
         };
       })
     );
-
-    console.log(verified);
   } catch (error) {
     console.error(error);
     return false;
@@ -403,7 +479,8 @@ client.on("interactionCreate", async (interaction) => {
 `Discord ID: ${discordId}
 Address: ${userData.ethereum}
 Twitter: ${userData.twitter}
-Google: ${userData.google}`
+Google: ${userData.google}
+Github: ${userData.github}`
     );
   } else if (interaction.commandName === "setrole") {
     // check if the user has the manage roles permission
@@ -498,7 +575,9 @@ Google: ${userData.google}`
       { providers: providersArray },
       { upsert: true }
     );
-    await interaction.reply("Providers set to " + providersArray.join(", "));
+    await interaction.reply(
+      "Providers set to " + providersArray.map((p) => `\`${p}\``).join(" ")
+    );
     const members = await guild.members.fetch();
     for (const member of members.values()) {
       await updateUserRoles(member.id);
@@ -511,9 +590,14 @@ Google: ${userData.google}`
       return;
     }
     const providers = serverSettings.providers;
-    await interaction.reply(`Providers set to ${providers.join(", ")}`);
+    await interaction.reply(
+      `Providers set to ${providers.map((p) => `\`${p}\``).join(" ")}`
+    );
   } else if (interaction.commandName === "supportedproviders") {
-    await interaction.reply("Currently supports " + supportedProviders.map(p => `\`${p}\``).join(" "));
+    await interaction.reply(
+      "Currently supports " +
+        supportedProviders.map((p) => `\`${p}\``).join(" ")
+    );
   }
 });
 
