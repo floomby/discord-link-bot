@@ -1,3 +1,5 @@
+// TODO Organize and split into multiple files
+
 import {
   REST,
   Routes,
@@ -12,8 +14,87 @@ import { config } from "dotenv";
 import { ProviderLink, ServerSettings } from "./odm";
 import mongoose from "mongoose";
 import Express from "express";
+import { ObjectId } from "mongodb";
 
 config();
+
+const verifyTwitterAuthorization = async (
+  accessToken: string,
+  twitterId: string
+) => {
+  const response = await fetch(`https://api.twitter.com/2/users/me`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  const verified = response.status === 200;
+
+  if (verified) {
+    return true;
+  }
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  const abort = async () => {
+    await session.abortTransaction();
+    await session.endSession();
+  };
+
+  try {
+    await ProviderLink.updateOne(
+      {
+        provider: "twitter",
+        providerId: twitterId,
+      },
+      {
+        $set: {
+          revokedAt: new Date(),
+        },
+      },
+      { session }
+    );
+
+    const oldAccount = await mongoose.connection.db
+      .collection("accounts")
+      .findOne(
+        {
+          providerAccountId: twitterId,
+          provider: "twitter",
+        },
+        { session }
+      );
+
+    if (!oldAccount) {
+      await session.commitTransaction();
+      await session.endSession();
+      return false;
+    }
+
+    await mongoose.connection.db.collection("users").deleteOne(
+      {
+        _id: oldAccount.userId,
+      },
+      { session }
+    );
+
+    await mongoose.connection.db.collection("accounts").deleteOne(
+      {
+        _id: oldAccount._id,
+      },
+      { session }
+    );
+
+    await session.commitTransaction();
+    await session.endSession();
+  } catch (error) {
+    console.error(error);
+    await abort();
+  }
+
+  return false;
+  // remove the account
+};
 
 const getUserDataFromDiscordId = async (discordId: string) => {
   console.log("Getting user data from discord id", discordId);
@@ -58,6 +139,63 @@ app.post("/discord", async (req, res) => {
   }
 
   await updateUserRoles(id);
+
+  res.sendStatus(200);
+  res.end();
+});
+
+app.post("/checkAuth", async (req, res) => {
+  try {
+    const docs = await mongoose.connection.db
+      .collection("providerlinks")
+      .aggregate([
+        {
+          $match: {
+            provider: "twitter",
+          },
+        },
+        {
+          $lookup: {
+            from: "accounts",
+            localField: "providerId",
+            foreignField: "providerAccountId",
+            as: "account",
+          },
+        },
+        // project so that we just get the discord id the twitter id and the access token
+        {
+          $project: {
+            discordId: 1,
+            providerId: 1,
+            accessToken: { $arrayElemAt: ["$account.access_token", 0] },
+            accountId: { $arrayElemAt: ["$account._id", 0] },
+            userId: { $arrayElemAt: ["$account.userId", 0] },
+          },
+        },
+      ])
+      .toArray();
+
+    const verified = await Promise.all(
+      docs.map(async (doc) => {
+        const verified = await verifyTwitterAuthorization(
+          doc.accessToken,
+          doc.providerId
+        );
+
+        return {
+          discordId: doc.discordId,
+          verified,
+        };
+      })
+    );
+
+    console.log(verified);
+  } catch (error) {
+    console.error(error);
+    res.sendStatus(500);
+    res.end();
+    return;
+  }
 
   res.sendStatus(200);
   res.end();
@@ -157,7 +295,7 @@ const updateUserRoleForGuild = async (
       console.log("User not found in guild", guild.id);
       return;
     }
-  
+
     // get the server settings
     const serverSettings = await ServerSettings.findOne({
       guildId: guild.id,
@@ -166,9 +304,9 @@ const updateUserRoleForGuild = async (
       console.log("No server settings found for guild", guild.id);
       return;
     }
-  
+
     const verifiedRole = serverSettings.roleId;
-  
+
     // grant the user the verified role
     if (verified) {
       await member.roles.add(verifiedRole);
@@ -221,7 +359,8 @@ client.on("interactionCreate", async (interaction) => {
     }
     // prettier-ignore
     await interaction.reply(
-`Address: ${userData.ethereum}
+`Discord ID: ${discordId}
+Address: ${userData.ethereum}
 Twitter: ${userData.twitter}
 Google: ${userData.google}`
     );
