@@ -185,6 +185,7 @@ const getUserDataFromDiscordId = async (discordId: string) => {
     const links = await ProviderLink.find({
       discordId,
       provider: { $in: supportedProviders },
+      revokedAt: null,
     });
 
     return Object.fromEntries(
