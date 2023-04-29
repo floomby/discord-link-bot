@@ -14,6 +14,7 @@ import { config } from "dotenv";
 import { ProviderLink, ServerSettings } from "./odm";
 import mongoose from "mongoose";
 import Express from "express";
+import fetch from "node-fetch";
 
 config();
 
@@ -118,7 +119,7 @@ const getUserDataFromDiscordId = async (discordId: string) => {
   }
 };
 
-const { TOKEN, CLIENT_ID, MONGODB_URI, WEBHOOK_PORT } = process.env;
+const { TOKEN, CLIENT_ID, MONGODB_URI, WEBHOOK_PORT, DEVELOPER_ID } = process.env;
 
 // set up the express server
 const app = Express();
@@ -384,6 +385,13 @@ client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === "info") {
+    // check if the user id is the developer id
+    const isDeveloper = interaction.user.id === DEVELOPER_ID;
+    if (!isDeveloper) {
+      await interaction.reply("You do not have permission to do this");
+      return;
+    }
+
     const discordId = interaction.options.getString("discord_id");
     const userData = await getUserDataFromDiscordId(discordId);
     if (!userData) {
