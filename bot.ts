@@ -12,11 +12,86 @@ import {
 } from "discord.js";
 import { config } from "dotenv";
 import { ProviderLink, ServerSettings } from "./odm";
-import mongoose from "mongoose";
+import mongoose, { set } from "mongoose";
 import Express from "express";
 import fetch from "node-fetch";
 
 config();
+
+const getTwitterInfo = async (
+  discordId: string
+): Promise<{
+  username: string;
+  avatar: string;
+  followers: string[];
+} | null> => {
+  try {
+    if (discordId.startsWith("<@") && discordId.endsWith(">")) {
+      discordId = discordId.trim().slice(2, -1);
+    }
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    const abort = async () => {
+      await session.abortTransaction();
+      await session.endSession();
+    };
+
+    const link = await ProviderLink.findOne(
+      {
+        discordId,
+        provider: "twitter",
+        revokedAt: null,
+      },
+      undefined,
+      { session }
+    );
+
+    if (!link) {
+      console.log("No link found");
+      await abort();
+      return null;
+    }
+
+    const account = await mongoose.connection.db.collection("accounts").findOne(
+      {
+        providerAccountId: link.providerId,
+      },
+      { session }
+    );
+
+    if (!account) {
+      console.log("No account found");
+      await abort();
+      return null;
+    }
+
+    // const me = await fetch(`https://api.twitter.com/2/users/me`, {
+    //   headers: {
+    //     Authorization: `Bearer ${account.accessToken}`,
+    //   },
+    // });
+    // const meJson = await me.json();
+    // console.log(meJson);
+
+    // get followers https://api.twitter.com/2/users/:id/following
+    const followers = await fetch(
+      `https://api.twitter.com/2/users/${link.providerId}/following`,
+      {
+        headers: {
+          // Authorization: `Bearer ${account.accessToken}`,
+          Authorization: `Bearer AAAAAAAAAAAAAAAAAAAAANDdmwEAAAAAJy7Ms6s4r2K8E8AM95v6cShigAc%3DEZ5gwHVmI0uDcECv0w2mmhUAryYBlZif7e2TjustNXKNBQXPjY`,
+        },
+      }
+    );
+    const followersJson = await followers.json();
+    console.log(followersJson);
+  } catch (error) {
+    console.error(error);
+    return null;
+  }
+
+  return null;
+};
 
 const verifyTwitterAuthorization = async (
   accessToken: string,
@@ -305,6 +380,18 @@ const commands = [
       },
     ],
   },
+  {
+    name: "twitterinfo",
+    description: "Returns the users twitter sso image and followers",
+    options: [
+      {
+        name: "discord_id",
+        description: "The discord id of the user",
+        type: 3,
+        required: true,
+      },
+    ],
+  },
   // sets the verified role for the server
   {
     name: "setrole",
@@ -458,6 +545,33 @@ client.on("ready", () => {
   });
 });
 
+// set presence when the bot joins a server
+client.on("guildCreate", () => {
+  client.user.setPresence({
+    status: "online",
+    activities: [
+      {
+        name: "www.social-link.xyz",
+        type: ActivityType.Playing,
+        url: "https://www.social-link.xyz",
+      },
+    ],
+  });
+});
+
+setInterval(async () => {
+  client.user.setPresence({
+    status: "online",
+    activities: [
+      {
+        name: "www.social-link.xyz",
+        type: ActivityType.Playing,
+        url: "https://www.social-link.xyz",
+      },
+    ],
+  });
+}, 1000 * 60 * 60 * 24);
+
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -482,6 +596,21 @@ Address: ${userData.ethereum}
 Twitter: ${userData.twitter}
 Google: ${userData.google}
 Github: ${userData.github}`
+    );
+  } else if (interaction.commandName === "twitterinfo") {
+    // check if the user id is the developer id
+    const isDeveloper = interaction.user.id === DEVELOPER_ID;
+    if (!isDeveloper) {
+      await interaction.reply("You do not have permission to do this");
+      return;
+    }
+
+    const discordId = interaction.options.getString("discord_id");
+
+    const twitterInfo = await getTwitterInfo(discordId);
+
+    await interaction.reply(
+      "getting twitter info for " + discordId + " " + twitterInfo
     );
   } else if (interaction.commandName === "setrole") {
     // check if the user has the manage roles permission
